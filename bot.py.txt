@@ -1,0 +1,101 @@
+import os
+import random
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+
+# Настройки
+TOKEN = os.getenv("BOT_TOKEN")  # Токен будем хранить в переменных окружения Render
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")  # Автоматическая переменная Render
+
+# Проверка обязательных переменных
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не установлен")
+if not RENDER_URL:
+    raise ValueError("RENDER_EXTERNAL_URL не установлен")
+
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
+
+# Инициализация бота и диспетчера
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# --- Игровые состояния (такие же, как раньше) ---
+class GameState(StatesGroup):
+    waiting_for_guess = State()
+
+@dp.message(Command("start"))
+async def start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Привет! Давай сыграем в «Угадай число»! Отправь /game чтобы начать.")
+
+@dp.message(Command("game"))
+async def game(message: types.Message, state: FSMContext):
+    number = random.randint(1, 100)
+    await state.update_data(number=number, attempts=0, max_attempts=5)
+    await state.set_state(GameState.waiting_for_guess)
+    await message.answer("Я загадал число от 1 до 100. У тебя 5 попыток. Попробуй угадать!")
+
+@dp.message(GameState.waiting_for_guess)
+async def guess(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    number = user_data.get("number")
+    attempts = user_data.get("attempts", 0)
+    max_attempts = user_data.get("max_attempts", 5)
+
+    try:
+        user_guess = int(message.text)
+    except ValueError:
+        await message.answer("Пожалуйста, введи целое число от 1 до 100.")
+        return
+
+    if user_guess < 1 or user_guess > 100:
+        await message.answer("Число должно быть в диапазоне от 1 до 100!")
+        return
+
+    attempts += 1
+    await state.update_data(attempts=attempts)
+
+    if user_guess == number:
+        await message.answer(f"Поздравляю! Ты угадал число {number} с {attempts} попытки(ок)! 🎉")
+        await state.clear()
+        return
+    elif user_guess < number:
+        hint = "больше"
+    else:
+        hint = "меньше"
+
+    if attempts >= max_attempts:
+        await message.answer(f"Ты проиграл. Я загадал число {number}. Попробуй ещё раз — /game!")
+        await state.clear()
+    else:
+        await message.answer(f"Не угадал! Попытка {attempts}/{max_attempts}. Загаданное число {hint}. Попробуй ещё:")
+
+@dp.message(Command("cancel"))
+async def cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Игра отменена. Напиши /game, чтобы сыграть заново.")
+
+# Настройка веб-приложения
+app = web.Application()
+
+# Регистрируем обработчик вебхука
+webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+webhook_handler.register(app, path=WEBHOOK_PATH)
+setup_application(app, dp, bot=bot)
+
+async def on_startup():
+    await bot.set_webhook(WEBHOOK_URL)
+
+# Запускаем приложение
+if __name__ == "__main__":
+    app.on_startup.append(on_startup)
+    web.run_app(app, port=int(os.getenv("PORT", 8080)))
